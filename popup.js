@@ -37,6 +37,8 @@ document.addEventListener('DOMContentLoaded', function() {
         return;
       }
       
+      showStatus('Filling form...', 'success');
+      
       chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
         chrome.scripting.executeScript({
           target: {tabId: tabs[0].id},
@@ -46,7 +48,16 @@ document.addEventListener('DOMContentLoaded', function() {
           if (chrome.runtime.lastError) {
             showStatus('Error filling form: ' + chrome.runtime.lastError.message, 'error');
           } else {
-            showStatus('Form filled successfully!', 'success');
+            if (results && results[0] && results[0].result) {
+              const result = results[0].result;
+              if (result.success) {
+                showStatus('Form filled successfully!', 'success');
+              } else {
+                showStatus('Form filling completed with issues: ' + result.message, 'error');
+              }
+            } else {
+              showStatus('Form filling completed, but with unknown status.', 'success');
+            }
           }
         });
       });
@@ -54,6 +65,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     function parseEmailContent(content) {
       const data = {};
+      
+      console.log("Parsing email content:", content);
       
       // Extract package info
       const packageMatch = content.match(/Package:\s*(.*?)(?:\n|$)/i);
@@ -64,40 +77,73 @@ document.addEventListener('DOMContentLoaded', function() {
       if (dateMatch && dateMatch[1].trim()) {
         // Convert date to format expected by the form (DD/MMM/YY)
         data.eventDate = formatDate(dateMatch[1].trim());
+        console.log("Parsed date:", dateMatch[1].trim(), "→", data.eventDate);
         
         // Check if it's a Saturday booking
-        const eventDate = new Date(dateMatch[1].replace(/(\d+)(st|nd|rd|th)/, '$1'));
-        data.isSaturday = eventDate.getDay() === 6; // 6 is Saturday
+        try {
+          let dateStr = dateMatch[1].trim();
+          // Remove ordinal suffixes (1st, 2nd, 3rd, etc.)
+          dateStr = dateStr.replace(/(\d+)(st|nd|rd|th)/, '$1');
+          
+          let eventDate;
+          // Try different date formats
+          if (dateStr.includes('/')) {
+            const parts = dateStr.split('/');
+            // Try both MM/DD/YYYY and DD/MM/YYYY formats
+            eventDate = new Date(parts[2], parts[1]-1, parts[0]); // DD/MM/YYYY
+            if (isNaN(eventDate.getTime())) {
+              eventDate = new Date(parts[2], parts[0]-1, parts[1]); // MM/DD/YYYY
+            }
+          } else {
+            eventDate = new Date(dateStr);
+          }
+          
+          if (!isNaN(eventDate.getTime())) {
+            data.isSaturday = eventDate.getDay() === 6; // 6 is Saturday
+            console.log("Date is a Saturday:", data.isSaturday);
+          } else {
+            console.log("Could not determine if date is a Saturday, defaulting to false");
+            data.isSaturday = false;
+          }
+        } catch (e) {
+          console.error("Error determining if date is Saturday:", e);
+          data.isSaturday = false;
+        }
       }
       
       // Extract start time
       const startTimeMatch = content.match(/Start time:\s*(.*?)(?:\n|$)/i);
       if (startTimeMatch) {
         data.startTime = startTimeMatch[1].trim();
+        console.log("Parsed start time:", data.startTime);
       }
       
       // Calculate finish time and total hours (assuming 4 hours is standard)
       if (data.startTime) {
         data.totalHours = 4;
         data.finishTime = calculateFinishTime(data.startTime, data.totalHours);
+        console.log("Calculated finish time:", data.finishTime);
       }
       
       // Extract room/venue
       const roomMatch = content.match(/Room:\s*(.*?)(?:\n|$)/i);
       if (roomMatch) {
         data.venue = roomMatch[1].trim();
+        console.log("Parsed venue:", data.venue);
       }
       
       // Extract client name (school/company)
       const clientNameMatch = content.match(/Client names:\s*(.*?)(?:\n|$)/i);
       if (clientNameMatch) {
         data.schoolCompany = clientNameMatch[1].trim();
+        console.log("Parsed school/company:", data.schoolCompany);
       }
       
       // Extract contact email
       const emailMatch = content.match(/Client contact email:\s*(.*?)(?:\n|$)/i);
       if (emailMatch) {
         data.contactEmail = emailMatch[1].trim();
+        console.log("Parsed contact email:", data.contactEmail);
         
         // Use the same email for the account contact if nothing else specified
         data.accountEmail = data.contactEmail;
@@ -107,11 +153,26 @@ document.addEventListener('DOMContentLoaded', function() {
       const phoneMatch = content.match(/Client contact phone:\s*(.*?)(?:\n|$)/i);
       if (phoneMatch) {
         data.contactPhone = phoneMatch[1].trim();
+        console.log("Parsed contact phone:", data.contactPhone);
       }
       
       // Set default values for fields not typically in email
       data.eventType = "Schools & Universities";
       data.createCustomerContact = true;
+      
+      // Try to be more flexible with parsing - look for keywords if standard patterns fail
+      if (!data.venue) {
+        // Try to find venue/location/place keywords
+        const venueKeywords = ['venue:', 'location:', 'place:', 'at:', 'in:'];
+        for (const keyword of venueKeywords) {
+          const match = content.match(new RegExp(keyword + '\\s*(.*?)(?:\\n|$)', 'i'));
+          if (match) {
+            data.venue = match[1].trim();
+            console.log("Found venue using keyword:", keyword, data.venue);
+            break;
+          }
+        }
+      }
       
       return data;
     }
@@ -220,54 +281,370 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // This function runs in the context of the web page
   function fillForm(data) {
+    console.log("Starting to fill form with data:", data);
     try {
+      // First, identify all form fields on the page
+      const inputs = document.querySelectorAll('input, textarea, select');
+      const radioGroups = {};
+      
+      // Create a map of all labels and their target elements
+      const labelMap = {};
+      document.querySelectorAll('label').forEach(label => {
+        const forId = label.getAttribute('for');
+        if (forId) {
+          labelMap[label.textContent.trim().toLowerCase()] = forId;
+        }
+      });
+      
+      console.log("Found " + inputs.length + " input fields on the page");
+      
       // Account details
-      fillInputByLabel("Account point of contact", "May");
-      fillInputByLabel("Account contact email", data.accountEmail || "");
+      console.log("Filling account details");
+      fillField("account point of contact", "May");
+      fillField("account contact email", data.accountEmail || "");
       
       // Event details
-      fillInputByLabel("Event date", data.eventDate || "");
-      fillSelectByLabel("Event type", data.eventType || "Schools & Universities");
+      console.log("Filling event details");
+      fillField("event date", data.eventDate || "", true);
+      
+      // Handle select for event type
+      const eventTypeSelects = Array.from(document.querySelectorAll('select')).filter(select => {
+        const nearbyLabel = findNearbyLabel(select);
+        return nearbyLabel && nearbyLabel.toLowerCase().includes("event type");
+      });
+      
+      if (eventTypeSelects.length > 0) {
+        const select = eventTypeSelects[0];
+        for (let i = 0; i < select.options.length; i++) {
+          if (select.options[i].text.includes("Schools & Universities")) {
+            select.selectedIndex = i;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            break;
+          }
+        }
+      }
       
       // Saturday booking
-      if (data.isSaturday !== undefined) {
-        const yesRadio = document.querySelector('input[type="radio"][value="Yes"]');
-        const noRadio = document.querySelector('input[type="radio"][value="No"]');
-        
-        if (data.isSaturday && yesRadio) {
-          yesRadio.checked = true;
-        } else if (noRadio) {
-          noRadio.checked = true;
+      console.log("Setting Saturday booking");
+      const saturdayBookingRadios = findRadioGroupByLabel("is it a saturday booking");
+      if (saturdayBookingRadios.length > 0) {
+        const valueToSelect = data.isSaturday ? "Yes" : "No";
+        for (const radio of saturdayBookingRadios) {
+          if ((radio.value === valueToSelect) || 
+              (radio.nextSibling && radio.nextSibling.textContent.trim() === valueToSelect)) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+            break;
+          }
         }
       }
       
       // Create customer contact
-      clickYesNoOption("Create customer contact", data.createCustomerContact || true);
+      console.log("Setting customer contact");
+      selectRadioOption("create customer contact", data.createCustomerContact ? "Y" : "N");
       
       // DJ package
-      clickYesNoOption("Order contains DJ package", data.hasDjPackage || true);
+      console.log("Setting DJ package");
+      selectRadioOption("order contains dj package", data.hasDjPackage ? "Y" : "N");
       
       // School/company
-      fillInputByLabel("School/company", data.schoolCompany || "");
+      console.log("Filling school/company");
+      fillField("school/company", data.schoolCompany || "");
       
       // Client contact details
-      fillInputByLabel("Customer best contact email", data.contactEmail || "");
-      fillInputByLabel("Customer contact phone", data.contactPhone || "");
+      console.log("Filling contact details");
+      fillField("customer best contact email", data.contactEmail || "");
+      fillField("customer contact phone", data.contactPhone || "");
       
       // Venue
-      fillInputByLabel("Venue (room)", data.venue || "");
+      console.log("Filling venue");
+      fillField("venue", data.venue || "");
       
       // Times
-      fillInputByLabel("Start time", data.startTime || "");
-      fillInputByLabel("Finish time", data.finishTime || "");
+      console.log("Filling times");
+      fillField("start time", data.startTime || "");
+      fillField("finish time", data.finishTime || "");
       
       // DJ hours
-      fillInputByLabel("DJ Total hours", data.totalHours || "4");
+      console.log("Filling DJ hours");
+      fillField("dj total hours", data.totalHours || "4");
       
+      console.log("Form filling complete");
       return {success: true, message: "Form filled successfully"};
     } catch (error) {
       console.error("Error filling form:", error);
       return {success: false, message: error.message};
+    }
+    
+    // Helper function to find form field by label text
+    function fillField(labelText, value, isDate = false) {
+      labelText = labelText.toLowerCase();
+      console.log(`Attempting to fill field "${labelText}" with value "${value}"`);
+      
+      // Direct match via for attribute
+      if (labelMap[labelText]) {
+        const el = document.getElementById(labelMap[labelText]);
+        if (el) {
+          console.log(`Found element by ID: ${labelMap[labelText]}`);
+          setValueAndTriggerEvents(el, value, isDate);
+          return true;
+        }
+      }
+      
+      // Find by nearby label text
+      let found = false;
+      
+      // First try direct input identification
+      inputs.forEach(input => {
+        if (found) return;
+        
+        // Skip radio buttons
+        if (input.type === 'radio') return;
+        
+        // Check input attributes for matches
+        const placeholder = (input.placeholder || "").toLowerCase();
+        const name = (input.name || "").toLowerCase();
+        const id = (input.id || "").toLowerCase();
+        
+        if (placeholder.includes(labelText) || 
+            name.includes(labelText) || 
+            id.includes(labelText.replace(/[^a-z0-9]/g, ''))) {
+          console.log(`Found input by attribute match: ${id || name}`);
+          setValueAndTriggerEvents(input, value, isDate);
+          found = true;
+          return;
+        }
+        
+        // Check for nearby text nodes
+        const nearbyText = findNearbyLabel(input);
+        if (nearbyText && nearbyText.toLowerCase().includes(labelText)) {
+          console.log(`Found input by nearby text: "${nearbyText}"`);
+          setValueAndTriggerEvents(input, value, isDate);
+          found = true;
+          return;
+        }
+      });
+      
+      if (!found) {
+        console.warn(`Could not find field for "${labelText}"`);
+      }
+      
+      return found;
+    }
+    
+    function findNearbyLabel(element) {
+      // Check if element has a label associated via for/id
+      const id = element.id;
+      if (id) {
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (label) return label.textContent.trim();
+      }
+      
+      // Check for parent label
+      let parent = element.parentElement;
+      while (parent && parent.tagName !== 'BODY') {
+        if (parent.tagName === 'LABEL') {
+          return parent.textContent.trim();
+        }
+        
+        // Check siblings for label-like elements
+        const siblings = Array.from(parent.children);
+        for (const sibling of siblings) {
+          if (sibling === element) continue;
+          
+          if (sibling.tagName === 'LABEL' || 
+              sibling.classList.contains('label') || 
+              sibling.classList.contains('field-label')) {
+            return sibling.textContent.trim();
+          }
+        }
+        
+        parent = parent.parentElement;
+      }
+      
+      // Look for nearby text nodes within a reasonable distance
+      const rect = element.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      
+      let closestText = '';
+      let closestDistance = Infinity;
+      
+      // Check text nodes nearby
+      const textElements = document.querySelectorAll('label, div, span, p');
+      textElements.forEach(el => {
+        if (el.textContent.trim() === '') return;
+        if (el.querySelector('input, select, textarea')) return; // Skip if contains form elements
+        
+        const elRect = el.getBoundingClientRect();
+        const elCenterX = elRect.left + elRect.width / 2;
+        const elCenterY = elRect.top + elRect.height / 2;
+        
+        // Calculate distance, weighing Y distance more (labels typically above/below inputs)
+        const deltaX = centerX - elCenterX;
+        const deltaY = (centerY - elCenterY) * 3; // Weight vertical distance more
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+        
+        if (distance < 200 && distance < closestDistance) { // 200px max distance
+          closestDistance = distance;
+          closestText = el.textContent.trim();
+        }
+      });
+      
+      return closestText;
+    }
+    
+    function findRadioGroupByLabel(labelText) {
+      labelText = labelText.toLowerCase();
+      const radios = [];
+      
+      // Find all radio groups
+      const radioInputs = document.querySelectorAll('input[type="radio"]');
+      const radioGroups = {};
+      
+      radioInputs.forEach(radio => {
+        const name = radio.name;
+        if (!radioGroups[name]) {
+          radioGroups[name] = [];
+        }
+        radioGroups[name].push(radio);
+      });
+      
+      // Find group with matching label
+      for (const [name, group] of Object.entries(radioGroups)) {
+        // Check if any radio has a label matching the text
+        let found = false;
+        
+        for (const radio of group) {
+          const label = findNearbyLabel(radio);
+          if (label && label.toLowerCase().includes(labelText)) {
+            found = true;
+            break;
+          }
+        }
+        
+        // Also check if the group's container has the label
+        if (!found) {
+          const container = findCommonAncestor(group);
+          if (container) {
+            const containerText = container.textContent.toLowerCase();
+            if (containerText.includes(labelText)) {
+              found = true;
+            }
+          }
+        }
+        
+        if (found) {
+          return group;
+        }
+      }
+      
+      return [];
+    }
+    
+    function findCommonAncestor(elements) {
+      if (elements.length === 0) return null;
+      if (elements.length === 1) return elements[0].parentElement;
+      
+      let ancestor = elements[0].parentElement;
+      while (ancestor) {
+        let containsAll = true;
+        for (let i = 1; i < elements.length; i++) {
+          if (!ancestor.contains(elements[i])) {
+            containsAll = false;
+            break;
+          }
+        }
+        
+        if (containsAll) return ancestor;
+        ancestor = ancestor.parentElement;
+      }
+      
+      return null;
+    }
+    
+    function selectRadioOption(labelText, value) {
+      const radioGroup = findRadioGroupByLabel(labelText);
+      console.log(`Found ${radioGroup.length} radio buttons for "${labelText}"`);
+      
+      if (radioGroup.length > 0) {
+        for (const radio of radioGroup) {
+          // Check radio value
+          if (radio.value.toLowerCase() === value.toLowerCase()) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+            console.log(`Set radio to ${value}`);
+            return true;
+          }
+          
+          // Check label text
+          const label = findNearbyLabel(radio);
+          if (label && (label.toLowerCase() === value.toLowerCase() || 
+                        label.toLowerCase().includes(value.toLowerCase()))) {
+            radio.checked = true;
+            radio.dispatchEvent(new Event('change', { bubbles: true }));
+            console.log(`Set radio with label "${label}" to checked`);
+            return true;
+          }
+        }
+        
+        // If no exact match, try Y/Yes and N/No matches
+        if (value.toLowerCase() === 'y' || value.toLowerCase() === 'yes') {
+          for (const radio of radioGroup) {
+            const label = findNearbyLabel(radio);
+            if ((radio.value === 'Y' || radio.value === 'Yes' || radio.value === 'yes') ||
+                (label && (label.includes('Y') || label.includes('Yes') || label.includes('yes')))) {
+              radio.checked = true;
+              radio.dispatchEvent(new Event('change', { bubbles: true }));
+              console.log(`Set radio to Y/Yes option`);
+              return true;
+            }
+          }
+        } else if (value.toLowerCase() === 'n' || value.toLowerCase() === 'no') {
+          for (const radio of radioGroup) {
+            const label = findNearbyLabel(radio);
+            if ((radio.value === 'N' || radio.value === 'No' || radio.value === 'no') ||
+                (label && (label.includes('N') || label.includes('No') || label.includes('no')))) {
+              radio.checked = true;
+              radio.dispatchEvent(new Event('change', { bubbles: true }));
+              console.log(`Set radio to N/No option`);
+              return true;
+            }
+          }
+        }
+      }
+      
+      console.warn(`Could not set radio option for "${labelText}" to "${value}"`);
+      return false;
+    }
+    
+    function setValueAndTriggerEvents(element, value, isDate) {
+      if (element.tagName === 'SELECT') {
+        for (let i = 0; i < element.options.length; i++) {
+          if (element.options[i].text.toLowerCase().includes(value.toLowerCase())) {
+            element.selectedIndex = i;
+            element.dispatchEvent(new Event('change', { bubbles: true }));
+            return;
+          }
+        }
+      } else {
+        // For date inputs, click it first to open the date picker
+        if (isDate && element.type !== 'date') {
+          element.click();
+        }
+        
+        // Set the value and trigger events
+        element.value = value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        // For date picker, add a slight pause and blur to ensure it updates
+        if (isDate) {
+          setTimeout(() => {
+            element.blur();
+          }, 100);
+        }
+      }
     }
     
     // Helper functions for filling form fields
