@@ -4,16 +4,15 @@
     "version": "1.0",
     "description": "Automatically fills DJ booking forms from email content",
     "permissions": ["activeTab", "scripting", "storage"],
+    "host_permissions": ["<all_urls>"],
     "action": {
       "default_popup": "popup.html",
       "default_icon": {
-        
         "48": "images/icon48.png",
         "128": "images/icon128.png"
       }
     },
     "icons": {
-      
       "48": "images/icon48.png",
       "128": "images/icon128.png"
     },
